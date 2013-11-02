@@ -1,0 +1,182 @@
+#!/usr/bin/python
+import fuse
+from fuse import Fuse
+from time import time
+
+import stat    # for file properties
+import os      # for filesystem modes (O_RDONLY, etc)
+import errno   # for error number codes (ENOENT, etc)
+               # - note: these must be returned as negatives
+import sys
+
+import eyeD3 as id3
+import sqlite3 as lite
+import json
+import logging
+
+fuse.fuse_python_api = (0, 2)
+
+m3tafs_path = os.path.expanduser('.m3tafs')
+m3tadb_path = m3tafs_path + '/media.db'
+pluginsdb_path = m3tafs_path + '/plugins.db'
+
+# MyStat is a subclass of stat, setting all properties to "reasonable" 
+# default values, so you only have to set the ones you need in your code.
+class MyStat(fuse.Stat):
+    def __init__(self):
+        self.st_mode = 0
+        self.st_ino = 0
+        self.st_dev = 0
+        self.st_nlink = 0
+        self.st_uid = 0
+        self.st_gid = 0
+        self.st_size = 0
+        self.st_atime = 0
+        self.st_mtime = 0
+        self.st_ctime = 0
+
+# M3taFs is a filesystem based on the metadata of media files (currently mp3 only)
+# Is is for now heavily based on the minimal example hello.py from the python fuse
+# examples.
+class M3taFs(Fuse):
+
+    enc = json.JSONEncoder(sort_keys = True)
+
+    # getMetadataFromFile extracts the metadata from an mp3 file and returns
+    # the metadata encoded as a JSON object
+    def getMetadataFromFile(self, path):
+        ext =  str(os.path.splitext(path)[1])[1:]
+
+        default_metadata = self.enc.encode({ "ext":ext }) 
+
+        if id3.isMp3File(path):
+            mp3file = id3.Mp3AudioFile(path)
+            tag = mp3file.getTag()
+            if type(tag) == type(None):
+                tag = id3.Tag()
+            album = tag.getAlbum()
+            title = tag.getTitle()
+            artist = tag.getArtist()
+            year = tag.getYear()
+            return self.enc.encode(
+                    {
+                        "ext": ext,
+                        "album": album,
+                        "title": title,
+                        "artist": artist,
+                        "year": year
+                    })
+
+        return default_metadata
+
+    # initializes the filesystem by walking throught the media directory and creating 
+    # the database containing all files together with their metadata
+    def __init__(self, mediadir, *args, **kw):
+        super(M3taFs, self).__init__(*args, **kw)
+        logging.basicConfig(filename = 'm3tafs.log', level=logging.DEBUG)
+        con = lite.connect(m3tadb_path)
+
+        with con:
+            cur = con.cursor()
+
+            for root,dirs,files in os.walk(mediadir):
+                for f in files:
+                    fpath = os.path.abspath(os.path.join(root, f))
+                    cur.execute("INSERT INTO Media VALUES(?, ?, ?)", (buffer(f), buffer(os.path.abspath(root)), self.getMetadataFromFile(fpath)))
+
+            con.commit()
+
+    def getattr(self, path):
+        logging.debug(' *** getattr *** ')
+        st = MyStat()
+        if path == '/':
+            st = os.stat(mediadir)
+        elif path == '.':
+            st.st_mode = stat.S_IFDIR | 0755
+        elif os.path.isdir(path):
+            st.st_mode = stat.S_IFDIR | 0755
+        else:
+            try:
+                con = lite.connect(m3tadb_path)
+                with con:
+                    cur = con.cursor()
+                    cur.execute("SELECT * FROM Media WHERE spath = ?", (path))
+                    metadata = json.loads(cur.fetchone())
+
+                st.st_mode = 0644
+            except:
+                return -errno.ENOENT
+
+        return st
+
+    # pathToFilter is meant to create a JSON object from the path that can
+    # then be used to filter the entries in the database.
+    def pathToFilter(self, path):
+        pass
+
+    def readdir(self, path, offset):
+        logging.debug(' *** readdir *** ')
+        con = lite.connect(m3tabdb_path)
+        with con:
+            cur = con.cursor()
+            cur.execute("SELECT DISTINCT metadata FROM Media")
+            data = cur.fetchall()
+
+        print data
+
+        for r in  '.', '..':
+            yield fuse.Direntry(r)
+
+    # open a file
+    def open(self, path, flags):
+        logging.debug(' *** open *** ')
+        if path != hello_path:
+            return -errno.ENOENT
+        accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
+        if (flags & accmode) != os.O_RDONLY:
+            return -errno.EACCES
+
+    # read data from a file
+    def read(self, path, size, offset):
+        logging.debug(' *** read *** ')
+        if path != hello_path:
+            return -errno.ENOENT
+        slen = len(hello_str)
+        if offset < slen:
+            if offset + size > slen:
+                size = slen - offset
+            buf = hello_str[offset:offset+size]
+        else:
+            buf = ''
+        return buf
+
+# main: checks the correct usage of the filesystem and clears the
+# media database. At some point it would probably be best to keep 
+# the db and just update it as needed.
+def main():
+    mediadir = sys.argv[1]
+    if not os.path.exists(m3tafs_path):
+        os.mkdir(m3tafs_path, 0750)
+
+    if not os.path.isfile(m3tadb_path):
+        dbfile = open(m3tadb_path, 'w+')
+        dbfile.close()
+
+    con = lite.connect(m3tadb_path)
+    con.execute("DROP TABLE IF EXISTS Media")
+    con.execute("CREATE TABLE Media(fname TEXT, spath TEXT, metadata TEXT)")
+    con.close()
+
+    usage="""
+m3ta fs
+
+""" + Fuse.fusage
+    server = M3taFs(mediadir, version="%prog " + fuse.__version__,
+                     usage=usage,
+                     dash_s_do='setsingle')
+
+    server.parse(errex=1)
+    server.main()
+
+if __name__ == '__main__':
+    main()
