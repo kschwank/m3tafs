@@ -1,46 +1,58 @@
 #!/usr/bin/python
-import fuse
-from fuse import Fuse
+
+from __future__ import with_statement
+
+from fuse import FUSE, FuseOSError, Operations
 from time import time
 
-import stat    # for file properties
 import os      # for filesystem modes (O_RDONLY, etc)
+import stat    # for file properties
 import errno   # for error number codes (ENOENT, etc)
                # - note: these must be returned as negatives
 import sys
 
 import eyeD3 as id3
 import sqlite3 as lite
-import json
 import logging
-
-fuse.fuse_python_api = (0, 2)
+import json
 
 m3tafs_path = os.path.expanduser('.m3tafs')
 m3tadb_path = m3tafs_path + '/media.db'
 pluginsdb_path = m3tafs_path + '/plugins.db'
 
-# MyStat is a subclass of stat, setting all properties to "reasonable" 
-# default values, so you only have to set the ones you need in your code.
-class MyStat(fuse.Stat):
-    def __init__(self):
-        self.st_mode = 0
-        self.st_ino = 0
-        self.st_dev = 0
-        self.st_nlink = 0
-        self.st_uid = 0
-        self.st_gid = 0
-        self.st_size = 0
-        self.st_atime = 0
-        self.st_mtime = 0
-        self.st_ctime = 0
-
 # M3taFs is a filesystem based on the metadata of media files (currently mp3 only)
 # Is is for now heavily based on the minimal example hello.py from the python fuse
 # examples.
-class M3taFs(Fuse):
+class M3taFs(Operations):
+
+    # initializes the filesystem by walking throught the media directory and creating 
+    # the database containing all files together with their metadata
+    def __init__(self, mediadir):
+
+        logging.basicConfig(filename = 'm3tafs.log', level=logging.DEBUG)
+        con = lite.connect(m3tadb_path)
+
+        with con:
+            cur = con.cursor()
+
+            for root,dirs,files in os.walk(mediadir):
+                for f in files:
+                    fpath = os.path.abspath(os.path.join(root, f))
+                    cur.execute("INSERT INTO Media VALUES(?, ?, ?)", (buffer(f), buffer(os.path.abspath(root)), self.getMetadataFromFile(fpath)))
+
+            con.commit()
+
 
     enc = json.JSONEncoder(sort_keys = True)
+
+# Helpers
+# =======
+
+    def _full_path(self, partial):
+        if partial.startswith("/"):
+            partial = partial[1:]
+            path = os.path.join(self.root, partial)
+            return path
 
     # getMetadataFromFile extracts the metadata from an mp3 file and returns
     # the metadata encoded as a JSON object
@@ -69,46 +81,6 @@ class M3taFs(Fuse):
 
         return default_metadata
 
-    # initializes the filesystem by walking throught the media directory and creating 
-    # the database containing all files together with their metadata
-    def __init__(self, mediadir, *args, **kw):
-        super(M3taFs, self).__init__(*args, **kw)
-        logging.basicConfig(filename = 'm3tafs.log', level=logging.DEBUG)
-        con = lite.connect(m3tadb_path)
-
-        with con:
-            cur = con.cursor()
-
-            for root,dirs,files in os.walk(mediadir):
-                for f in files:
-                    fpath = os.path.abspath(os.path.join(root, f))
-                    cur.execute("INSERT INTO Media VALUES(?, ?, ?)", (buffer(f), buffer(os.path.abspath(root)), self.getMetadataFromFile(fpath)))
-
-            con.commit()
-
-    def getattr(self, path):
-        logging.debug(' *** getattr *** ')
-        st = MyStat()
-        if path == '/':
-            st = os.stat(mediadir)
-        elif path == '.':
-            st.st_mode = stat.S_IFDIR | 0755
-        elif os.path.isdir(path):
-            st.st_mode = stat.S_IFDIR | 0755
-        else:
-            try:
-                con = lite.connect(m3tadb_path)
-                with con:
-                    cur = con.cursor()
-                    cur.execute("SELECT * FROM Media WHERE spath = ?", (path))
-                    metadata = json.loads(cur.fetchone())
-
-                st.st_mode = 0644
-            except:
-                return -errno.ENOENT
-
-        return st
-
     # pathToFilter is meant to create a JSON object from the path that can
     # then be used to filter the entries in the database.
     def pathToFilter(self, path):
@@ -127,34 +99,130 @@ class M3taFs(Fuse):
         for r in  '.', '..':
             yield fuse.Direntry(r)
 
-    # open a file
-    def open(self, path, flags):
-        logging.debug(' *** open *** ')
-        if path != hello_path:
-            return -errno.ENOENT
-        accmode = os.O_RDONLY | os.O_WRONLY | os.O_RDWR
-        if (flags & accmode) != os.O_RDONLY:
-            return -errno.EACCES
 
-    # read data from a file
-    def read(self, path, size, offset):
-        logging.debug(' *** read *** ')
-        if path != hello_path:
-            return -errno.ENOENT
-        slen = len(hello_str)
-        if offset < slen:
-            if offset + size > slen:
-                size = slen - offset
-            buf = hello_str[offset:offset+size]
+# Filesystem methods
+# ==================
+
+    def access(self, path, mode):
+        full_path = self._full_path(path)
+        if not os.access(full_path, mode):
+            raise FuseOSError(errno.EACCES)
+
+    def chmod(self, path, mode):
+        full_path = self._full_path(path)
+        return os.chmod(full_path, mode)
+
+    def chown(self, path, uid, gid):
+        full_path = self._full_path(path)
+        return os.chown(full_path, uid, gid)
+
+    def getattr(self, path, fh=None):
+        full_path = self._full_path(path)
+        st = os.lstat(full_path)
+        return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+#
+#       try:
+#           con = lite.connect(m3tadb_path)
+#           with con:
+#               cur = con.cursor()
+#               cur.execute("SELECT * FROM Media WHERE spath = ?", (path))
+#               metadata = json.loads(cur.fetchone())
+
+#           st.st_mode = 0644
+#       except:
+#           return -errno.ENOENT
+#
+#       return st
+                                                                                                                                                                                                'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+    def readdir(self, path, fh):
+        full_path = self._full_path(path)
+
+        dirents = ['.', '..']
+        if os.path.isdir(full_path):
+            dirents.extend(os.listdir(full_path))
+            for r in dirents:
+                yield r
+
+    def readlink(self, path):
+        pathname = os.readlink(self._full_path(path))
+        if pathname.startswith("/"):
+            # Path name is absolute, sanitize it.
+            return os.path.relpath(pathname, self.root)
         else:
-            buf = ''
-        return buf
+            return pathname
+
+    def mknod(self, path, mode, dev):
+        return os.mknod(self._full_path(path), mode, dev)
+
+    def rmdir(self, path):
+        full_path = self._full_path(path)
+        return os.rmdir(full_path)
+
+    def mkdir(self, path, mode):
+        return os.mkdir(self._full_path(path), mode)
+
+    def statfs(self, path):
+        full_path = self._full_path(path)
+        stv = os.statvfs(full_path)
+        return dict((key, getattr(stv, key)) for key in ('f_bavail', 'f_bfree',
+            'f_blocks', 'f_bsize', 'f_favail', 'f_ffree', 'f_files', 'f_flag',
+            'f_frsize', 'f_namemax'))
+
+    def unlink(self, path):
+        return os.unlink(self._full_path(path))
+
+    def symlink(self, target, name):
+        return os.symlink(self._full_path(target), self._full_path(name))
+
+    def rename(self, old, new):
+        return os.rename(self._full_path(old), self._full_path(new))
+
+    def link(self, target, name):
+        return os.link(self._full_path(target), self._full_path(name))
+
+    def utimens(self, path, times=None):
+        return os.utime(self._full_path(path), times)
+
+# File methods
+# ============
+
+    def open(self, path, flags):
+        full_path = self._full_path(path)
+        return os.open(full_path, flags)
+
+    def create(self, path, mode, fi=None):
+        full_path = self._full_path(path)
+        return os.open(full_path, os.O_WRONLY | os.O_CREAT, mode)
+
+    def read(self, path, length, offset, fh):
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.read(fh, length)
+
+    def write(self, path, buf, offset, fh):
+        os.lseek(fh, offset, os.SEEK_SET)
+        return os.write(fh, buf)
+
+    def truncate(self, path, length, fh=None):
+        full_path = self._full_path(path)
+        with open(full_path, 'r+') as f:
+            f.truncate(length)
+
+    def flush(self, path, fh):
+        return os.fsync(fh)
+
+    def release(self, path, fh):
+        return os.close(fh)
+
+    def fsync(self, path, fdatasync, fh):
+        return self.flush(path, fh)
+
 
 # main: checks the correct usage of the filesystem and clears the
 # media database. At some point it would probably be best to keep 
 # the db and just update it as needed.
-def main():
-    mediadir = sys.argv[1]
+def main(mountpoint, root):
+    FUSE(Passthrough(root), mountpoint, foreground=True)
+
     if not os.path.exists(m3tafs_path):
         os.mkdir(m3tafs_path, 0750)
 
@@ -179,4 +247,4 @@ m3ta fs
     server.main()
 
 if __name__ == '__main__':
-    main()
+    main(sys.argv[2], sys.argv[1])
