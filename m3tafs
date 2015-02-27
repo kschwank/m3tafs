@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 
 from __future__ import with_statement
 
@@ -20,14 +20,13 @@ m3tafs_path = os.path.expanduser('.m3tafs')
 m3tadb_path = m3tafs_path + '/media.db'
 pluginsdb_path = m3tafs_path + '/plugins.db'
 
-# M3taFs is a filesystem based on the metadata of media files (currently mp3 only)
-# Is is for now heavily based on the minimal example hello.py from the python fuse
-# examples.
 class M3taFs(Operations):
 
     # initializes the filesystem by walking throught the media directory and creating 
     # the database containing all files together with their metadata
     def __init__(self, mediadir):
+
+        self.mediadir = mediadir
 
         logging.basicConfig(filename = 'm3tafs.log', level=logging.DEBUG)
         con = lite.connect(m3tadb_path)
@@ -38,6 +37,7 @@ class M3taFs(Operations):
             for root,dirs,files in os.walk(mediadir):
                 for f in files:
                     fpath = os.path.abspath(os.path.join(root, f))
+                    print(fpath)
                     cur.execute("INSERT INTO Media VALUES(?, ?, ?)", (buffer(f), buffer(os.path.abspath(root)), self.getMetadataFromFile(fpath)))
 
             con.commit()
@@ -51,7 +51,7 @@ class M3taFs(Operations):
     def _full_path(self, partial):
         if partial.startswith("/"):
             partial = partial[1:]
-            path = os.path.join(self.root, partial)
+            path = os.path.join(self.mediadir, partial)
             return path
 
     # getMetadataFromFile extracts the metadata from an mp3 file and returns
@@ -120,6 +120,7 @@ class M3taFs(Operations):
         full_path = self._full_path(path)
         st = os.lstat(full_path)
         return dict((key, getattr(st, key)) for key in ('st_atime', 'st_ctime',
+            'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
 #
 #       try:
 #           con = lite.connect(m3tadb_path)
@@ -133,7 +134,7 @@ class M3taFs(Operations):
 #           return -errno.ENOENT
 #
 #       return st
-                                                                                                                                                                                                'st_gid', 'st_mode', 'st_mtime', 'st_nlink', 'st_size', 'st_uid'))
+                                            
     def readdir(self, path, fh):
         full_path = self._full_path(path)
 
@@ -221,10 +222,11 @@ class M3taFs(Operations):
 # media database. At some point it would probably be best to keep 
 # the db and just update it as needed.
 def main(mountpoint, root):
-    FUSE(Passthrough(root), mountpoint, foreground=True)
 
     if not os.path.exists(m3tafs_path):
         os.mkdir(m3tafs_path, 0750)
+ 
+    print(m3tadb_path)
 
     if not os.path.isfile(m3tadb_path):
         dbfile = open(m3tadb_path, 'w+')
@@ -235,16 +237,7 @@ def main(mountpoint, root):
     con.execute("CREATE TABLE Media(fname TEXT, spath TEXT, metadata TEXT)")
     con.close()
 
-    usage="""
-m3ta fs
-
-""" + Fuse.fusage
-    server = M3taFs(mediadir, version="%prog " + fuse.__version__,
-                     usage=usage,
-                     dash_s_do='setsingle')
-
-    server.parse(errex=1)
-    server.main()
+    FUSE(M3taFs(root), mountpoint, foreground=True)
 
 if __name__ == '__main__':
     main(sys.argv[2], sys.argv[1])
